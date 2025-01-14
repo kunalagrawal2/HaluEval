@@ -5,8 +5,14 @@ import json
 import argparse
 import tiktoken
 
+import requests
 
-openai.api_key = 'sk-'
+import pandas as pd
+
+
+
+
+openai.api_key = ''
 
 def get_qa_response(model, question, answer, instruction):
     message = [
@@ -26,6 +32,20 @@ def get_qa_response(model, question, answer, instruction):
                     temperature=0.0,
                 )
                 response = res['choices'][0]['message']['content']
+            elif model == "gpt-4o":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']
+            elif model == "gpt-4o-mini":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o-mini",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']    
             else:
                 res = openai.Completion.create(
                     engine=model,
@@ -53,6 +73,16 @@ def get_qa_response(model, question, answer, instruction):
     return response
 
 
+def majority_vote(judgements):
+    counts = {"Yes": judgements.count("Yes"), "No": judgements.count("No")}
+    if counts["Yes"] > counts["No"]:
+        return "Yes"
+    elif counts["No"] > counts["Yes"]:
+        return "No"
+    else:
+        return "No" # shouldn't be possible to tie with 3 models, keeping in case have to deal with more than 3 later
+
+
 def get_dialogue_response(model, dialog, response, instruction):
     message = [
         {"role": "system", "content": "You are a response judge. You MUST determine if the provided response contains non-factual or hallucinated information. The answer you give MUST be \"Yes\" or \"No\""},
@@ -71,6 +101,20 @@ def get_dialogue_response(model, dialog, response, instruction):
                     temperature=0.0,
                 )
                 response = res['choices'][0]['message']['content']
+            elif model == "gpt-4o":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']   
+            elif model == "gpt-4o-mini":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o-mini",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']   
             else:
                 res = openai.Completion.create(
                     model=model,
@@ -136,6 +180,20 @@ def get_summarization_response(model, document, summary, instruction):
                     temperature=0.0,
                 )
                 response = res['choices'][0]['message']['content']
+            elif model == "gpt-4o":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']
+            elif model == "gpt-4o-mini":
+                res = openai.ChatCompletion.create(
+                    model="gpt-4o-mini",
+                    messages=message,
+                    temperature=0.0,
+                )
+                response = res['choices'][0]['message']['content']   
             else:
                 res = openai.Completion.create(
                     model=model,
@@ -163,12 +221,33 @@ def get_summarization_response(model, document, summary, instruction):
     return response
 
 
+def sentence_similarity(model_response, answer):
+    api_token = ""
+    API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    def query(payload):
+        response = requests.post(API_URL, headers=headers, json=payload)
+        return response.json()
+
+    data = query(
+        {
+            "inputs": {
+                "source_sentence": answer,
+                "sentences":[model_response]
+            }
+        })
+    return data
+
+
 def evaluation_qa_dataset(model, file, instruction, output_path):
+    similarity_data = pd.DataFrame(columns=['sentence_similarity', 'hallucination'])
     with open(file, 'r', encoding="utf-8") as f:
         data = []
         for line in f:
             data.append(json.loads(line))
 
+        
         correct = 0
         incorrect = 0
         for i in range(len(data)):
@@ -205,16 +284,21 @@ def evaluation_qa_dataset(model, file, instruction, output_path):
                 gen = None
                 incorrect += 1
 
+
             assert(gen is not None)
+
+            row = {"sentence_similarity": sentence_similarity(ans, right_answer), "hallucination": gen['judgement']}
+            similarity_data = similarity_data._append(row, ignore_index=True)
 
             if ground_truth == ans:
                 correct += 1
             else:
                 incorrect += 1
-
             print('sample {} success......'.format(i))
             dump_jsonl(gen, output_path, append=True)
 
+        
+        similarity_data.to_csv('sentence_similarity.csv', index=True)
         print('{} correct samples, {} incorrect samples, Accuracy: {}'.format(correct, incorrect, correct/len(data)))
 
 
@@ -269,6 +353,60 @@ def evaluation_dialogue_dataset(model, file, instruction, output_path):
             dump_jsonl(gen, output_path, append=True)
 
         print('{} correct samples, {} incorrect samples, Accuracy: {}'.format(correct, incorrect, correct / len(data)))
+
+
+def evaluation_qa_ensemble(models, file, instruction, output_path):
+    with open(file, 'r', encoding="utf-8") as f:
+        data = [json.loads(line) for line in f]
+
+    correct, incorrect = 0, 0
+
+    for i, record in enumerate(data):
+        knowledge = record["knowledge"]
+        question = record["question"]
+        hallucinated_answer = record["hallucinated_answer"]
+        right_answer = record["right_answer"]
+
+        if random.random() > 0.5:
+            answer = hallucinated_answer
+            ground_truth = "Yes"
+        else:
+            answer = right_answer
+            ground_truth = "No"
+
+        # Get responses from all models
+        model_judgements = []
+        for model in models:
+            print(f"Model: {model}")
+            response = get_qa_response(model, question, answer, instruction)
+            model_judgements.append(response)
+
+        # Ensemble by majority vote
+        final_judgement = majority_vote(model_judgements)
+        
+        judgement = final_judgement
+
+        result = {
+            "knowledge": knowledge,
+            "question": question,
+            "answer": answer,
+            "ground_truth": ground_truth,
+            "judgement": judgement
+        }
+
+        # Check correctness
+        if ground_truth == final_judgement:
+            correct += 1
+            print(f'Sample {i} success...')
+        else:
+            incorrect += 1
+            print(f'Sample {i} failed...')
+
+        dump_jsonl(result, output_path, append=True)
+
+    total = correct + incorrect
+    accuracy = correct / total if total > 0 else 0
+    print(f'{correct} correct samples, {incorrect} incorrect samples, Accuracy: {accuracy:.2f}')
 
 
 def evaluation_summarization_dataset(model, file, instruction, output_path):
@@ -338,20 +476,27 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Hallucination Generation")
 
     parser.add_argument("--task", default="qa", help="qa, dialogue, or summarization")
-    parser.add_argument("--model", default="davinci", help="model name")
+    #parser.add_argument("--model", default="davinci", help="model name")
+    parser.add_argument("--models", nargs='+', help="models to use for ensembling")
     args = parser.parse_args()
 
     instruction_file = "{}/{}_evaluation_instruction.txt".format(args.task, args.task)
     f = open(instruction_file, 'r', encoding="utf-8")
     instruction = f.read()
 
-    model = args.model
-    output_path = "{}/{}_{}_results.json".format(args.task, args.task, args.model)
+    #model = args.model
+    models = args.models
+    model = models[0]
+    output_path = "{}/{}_{}_results.json".format(args.task, args.task, model)
 
     data = "../data/{}_data.json".format(args.task)
 
     if args.task == "qa":
-        evaluation_qa_dataset(model, data, instruction, output_path)
+        if len(models) == 1:
+            evaluation_qa_dataset(model, data, instruction, output_path)
+        else:
+            output_path = "{}/{}_{}_results.json".format(args.task, args.task, "ensemble")
+            evaluation_qa_ensemble(models, data, instruction, output_path) 
     elif args.task == "dialogue":
         evaluation_dialogue_dataset(model, data, instruction, output_path)
     elif args.task == "summarization":

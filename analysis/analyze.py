@@ -1,6 +1,8 @@
 import json
 from nltk.tokenize import RegexpTokenizer
 from gensim.utils import simple_preprocess
+import nltk
+nltk.download('stopwords')
 from nltk.corpus import stopwords
 import spacy
 from gensim.models import Phrases
